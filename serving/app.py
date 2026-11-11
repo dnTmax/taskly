@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 
 import mlflow.sklearn
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from mlflow import MlflowClient
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel
@@ -31,6 +31,7 @@ class JsonFormatter(logging.Formatter):
             "model_name": MODEL_NAME,
             "model_version": state["version"],
         }
+        payload.update(getattr(record, "fields", {}))
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload)
@@ -76,6 +77,28 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="task-priority-serving", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Une ligne JSON par requete (hors sondes de sante et metriques)."""
+    start = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        if request.url.path not in ("/health", "/ready", "/metrics"):
+            logger.info(
+                "requete http",
+                extra={"fields": {
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status,
+                    "duration_ms": round((time.perf_counter() - start) * 1000, 1),
+                }},
+            )
 
 
 class TaskIn(BaseModel):
