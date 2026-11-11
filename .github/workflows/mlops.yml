@@ -62,6 +62,12 @@ jobs:
           export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
           python scripts/promote.py --to staging | tee report.json
           echo "version=$(jq -r .candidate_version report.json)" >> "$GITHUB_OUTPUT"
+      - name: Agent de validation (avis consultatif)
+        if: always()
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 agents/validate_candidate.py report.json
 
   build:
     name: Construction de l'image de l'API
@@ -109,6 +115,15 @@ jobs:
           VERSION=$(curl -s localhost:8101/metrics | grep '^model_info' | sed 's/.*model_version="\([0-9]*\)".*/\1/')
           echo "version servie en staging : $VERSION (attendue : ${{ needs.promote-staging.outputs.version }})"
           [ "$VERSION" = "${{ needs.promote-staging.outputs.version }}" ]
+      - name: Agent de controle de staging (avis avant approbation)
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          kubectl -n staging port-forward svc/model-serving-api 8103:80 >/dev/null 2>&1 &
+          sleep 5
+          python3 agents/check_staging.py --url http://127.0.0.1:8103 \
+            --expected-version "${{ needs.promote-staging.outputs.version }}"
 
   deploy-production:
     name: Promotion et deploiement en production (approbation manuelle)

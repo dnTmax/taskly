@@ -1,0 +1,5 @@
+{"level": "INFO", "message": "requete http", "model_version": "6", "status": 200}
+{"level": "INFO", "message": "requete http", "model_version": "6", "status": 200}
+{"level": "INFO", "message": "requete http", "model_version": "7", "status": 500}
+{"level": "ERROR", "message": "erreur de prediction", "model_version": "7", "exception": "ValueError: colonne inattendue"}
+{"level": "INFO", "message": "requete http", "model_version": "7", "status": 500}

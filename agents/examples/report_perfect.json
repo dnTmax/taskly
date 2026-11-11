@@ -1,0 +1,1 @@
+{"candidate_version": "7", "candidate_score": 1.0, "production_version": "6", "production_score": 1.0, "metric": "f1_macro", "min_score": 0.7, "tolerance": 0.02, "decision": "promu en staging"}
