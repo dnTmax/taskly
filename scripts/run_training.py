@@ -27,7 +27,12 @@ def upload_sources(s3, bucket, key):
 
 
 def state(ec2, iid):
-    r = ec2.describe_instances(InstanceIds=[iid])["Reservations"][0]["Instances"][0]
+    try:
+        r = ec2.describe_instances(InstanceIds=[iid])["Reservations"][0]["Instances"][0]
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "InvalidInstanceID.NotFound":
+            return "pending"  # AWS n'a pas encore propage l'instance (delai normal)
+        raise
     return r["State"]["Name"]
 
 
