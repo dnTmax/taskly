@@ -37,7 +37,7 @@ jobs:
         run: |
           NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
           SUBNET=$(aws ec2 describe-subnets --filters "Name=tag:Name,Values=${CLUSTER}-vpc-private-*" --query "Subnets[0].SubnetId" --output text)
-          BUCKET=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, '${CLUSTER}-artifacts-')].Name | [0]" --output text)
+          BUCKET="${CLUSTER}-artifacts-$(aws sts get-caller-identity --query Account --output text)"
           python scripts/run_training.py --bucket "$BUCKET" --subnet "$SUBNET" \
             --template "${CLUSTER}-training" --mlflow-uri "http://${NODE_IP}:30500"
 
