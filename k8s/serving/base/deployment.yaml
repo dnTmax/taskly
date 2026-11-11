@@ -35,6 +35,10 @@ spec:
               value: task-priority-classifier
             - name: MODEL_ALIAS
               value: production
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]   # laisse le temps au service de retirer le pod
           readinessProbe:
             httpGet:
               path: /ready
