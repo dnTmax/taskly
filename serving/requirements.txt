@@ -1,0 +1,10 @@
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.0
+mlflow-skinny==2.22.5
+scikit-learn==1.9.1
+pandas==2.3.3
+numpy==2.5.4
+cloudpickle==3.1.2
+prometheus-client==0.20.0
+boto3==1.35.99
