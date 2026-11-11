@@ -22,3 +22,9 @@ variable "training_instance_type" {
   type    = string
   default = "t3.large"
 }
+
+# Nouveau format de l'identite GitHub (OIDC) : proprietaire@id/depot@id
+variable "github_repo_sub" {
+  type    = string
+  default = "dnTmax@111535912/taskly@1451548208"
+}

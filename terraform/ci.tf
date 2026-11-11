@@ -32,6 +32,8 @@ data "aws_iam_policy_document" "github_trust" {
       values = [
         "repo:${var.github_repo}:ref:refs/heads/main",
         "repo:${var.github_repo}:environment:*",
+        "repo:${var.github_repo_sub}:ref:refs/heads/main",
+        "repo:${var.github_repo_sub}:environment:*",
       ]
     }
   }
@@ -96,3 +98,4 @@ resource "aws_eks_access_policy_association" "github_actions" {
     type = "cluster"
   }
 }
+

@@ -1,190 +1,202 @@
-# Tasks API
+# MLFlowOps: train, version and serve a task-priority classifier on AWS
 
-A minimal FastAPI task tracker backed by Postgres, with a Redis read-through cache.
+English | [Français](README.fr.md)
 
-## Quick Start (Docker)
+This project trains, versions and serves a machine-learning model that predicts the
+priority (`low`, `medium`, `high`) of a task from its title and description. Everything
+around the model follows DevOps practices: infrastructure as code, a model registry,
+spot-instance training, a CI/CD pipeline with a manual approval, monitoring and alerts.
 
-```bash
-docker compose up
+The original Tasks API that this repository started from is documented in
+[docs/TASKS-API.md](docs/TASKS-API.md). Design choices and their reasons are in
+[docs/DECISIONS.md](docs/DECISIONS.md).
+
+## Architecture
+
+```mermaid
+flowchart TB
+  dev[Developer] -->|Run workflow| train
+  subgraph gha[GitHub Actions - AWS access through OIDC, no stored keys]
+    train[1 Train on a spot instance] --> promote[2 Promote to staging]
+    train --> build[3 Build the API image]
+    promote --> deps[4 Deploy staging]
+    build --> deps
+    deps --> approve{5 Manual approval}
+    approve --> depp[6 Promote and deploy production]
+  end
+  train -->|SSM Run Command| spot[EC2 spot instance]
+  spot -->|log and register the model| mlflow
+  build --> ecr[(ECR)]
+  mlflow --> s3[(S3 artifacts)]
+  subgraph eks[EKS cluster dnt-mlflowops]
+    mlflow[MLflow server] --> pg[(Postgres)]
+    stg[API staging alias staging]
+    prod[API production alias production]
+    stg -->|load the model at startup| mlflow
+    prod -->|load the model at startup| mlflow
+    mon[Prometheus and Grafana] -->|scrape metrics| stg
+    mon -->|scrape metrics| prod
+  end
+  promote -->|set alias staging| mlflow
+  depp -->|set alias production| mlflow
 ```
 
-This starts three containers — `api`, `db` (Postgres), and `redis` — wired together with the
-right env vars and healthchecks. The API is then available at http://localhost:8000, and
-Postgres/Redis are also published to `localhost:5432` / `localhost:6379` so you can reach them
-from tools or scripts running on your host (e.g. the model training scripts below).
+| Component | Role |
+|---|---|
+| Terraform | VPC, EKS, S3 bucket, ECR repositories, IAM roles (IRSA, GitHub OIDC), spot launch template |
+| MLflow + Postgres (EKS) | Experiment tracking and Model Registry; artifacts stored in S3 through the server (proxy mode) |
+| Spot instance | Short-lived machine that trains the model, driven through SSM (no SSH) |
+| GitHub Actions | Orchestrates train, promote, build, deploy, approval |
+| API (FastAPI, EKS) | `POST /predict`; loads the model from the registry at startup by alias |
+| Prometheus + Grafana | Metrics, dashboard with an environment selector, alert above 5 % errors |
 
-Once it's up:
+## Repository layout
 
-```bash
-curl http://localhost:8000/health
-# {"status":"ok","service":"tasks-api"}
-```
+| Path | Content |
+|---|---|
+| `terraform/` | All AWS infrastructure |
+| `training/` | Pinned requirements and the script that runs on the spot instance |
+| `scripts/run_training.py` | Launches the spot instance, trains through SSM, always terminates the instance |
+| `scripts/promote.py` | Promotes a model version with aliases, with a validation rule |
+| `model/` | Data generation and training code |
+| `serving/` | The prediction API and its Dockerfile |
+| `mlflow-server/` | Dockerfile of the MLflow server image |
+| `k8s/` | Kubernetes manifests (MLflow, Postgres, monitoring) |
+| `k8s/serving/` | Kustomize base and overlays for `staging` and `production` |
+| `.github/workflows/mlops.yml` | The CI/CD pipeline |
 
-## Running Locally Without Docker
+## Prerequisites
 
-**Use Python 3.10–3.12.** The pinned `pydantic==2.7.0` / `pydantic-core==2.18.1` has no
-prebuilt wheel for Python 3.13+, so pip will try to compile it from source and fail. If
-`python3 -V` shows 3.13 or newer, install 3.12 separately (e.g. `brew install python@3.12`)
-and use that to create the venv below.
+AWS account and credentials, Terraform, kubectl, Helm, Docker, the AWS CLI, Python 3.12,
+and a GitHub repository with two environments named `staging` and `production`
+(Settings, Environments). On `production`, enable **Required reviewers**.
 
-The app still needs a Postgres database and a Redis instance to run, even outside Docker. The
-easiest way to get both is to let Docker run just those two:
+## Deploy from scratch
 
-```bash
-docker compose up -d db redis
-```
-
-Then run the API itself on your host:
-
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn main:app --reload
-```
-
-By default the app connects to `postgresql+psycopg2://tasks:tasks@localhost:5432/tasks` and
-`redis://localhost:6379/0` — override with the `DATABASE_URL` / `REDIS_URL` env vars if your
-setup differs.
-
-## Using the Swagger UI
-
-FastAPI serves interactive API docs (Swagger UI) at `/docs` whenever the app is running.
-
-1. Start the app (`uvicorn main:app --reload` or `docker compose up`).
-2. Open http://localhost:8000/docs in a browser.
-3. Expand an endpoint, e.g. `POST /tasks`, and click **Try it out**.
-4. Edit the example request body, e.g.:
-   ```json
-   {
-     "title": "Write the report",
-     "description": "Due Friday",
-     "priority": "medium"
-   }
-   ```
-5. Click **Execute** to send the request and see the live response below, including the
-   assigned `id`.
-6. Use the `id` from that response to try `GET /tasks/{task_id}`, `PATCH /tasks/{task_id}`, or
-   `DELETE /tasks/{task_id}` the same way.
-7. `GET /tasks` lists everything currently stored; `GET /health` is a quick liveness check.
-
-A raw OpenAPI schema is also available at `/openapi.json` if you want to feed it into another
-tool (Postman, codegen, etc).
-
-## Running Tests
+1. Infrastructure (about 15 minutes):
 
 ```bash
-python3.12 -m venv .venv-dev
-source .venv-dev/bin/activate   # Windows: .venv-dev\Scripts\activate
-pip install -r requirements-dev.txt
-pytest
+cd terraform
+terraform init
+terraform apply
+$(terraform output -raw kubeconfig_command)
+cd ..
 ```
 
-The test suite (`tests/`) covers the CRUD endpoints and cache invalidation. It runs against an
-in-memory SQLite database and a fake Redis client, so it needs neither Docker nor a real
-Postgres/Redis instance — safe to run on its own, with or without `docker compose up`.
-
-## Verifying the API End-to-End
-
-A quick manual smoke test once the app is running (via Docker or locally), beyond the Swagger
-UI:
+2. Build and push the MLflow image (add `--platform linux/amd64` when building on an ARM machine):
 
 ```bash
-# health check
-curl http://localhost:8000/health
-
-# create a task
-curl -X POST http://localhost:8000/tasks \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Write report","description":"Due Friday","priority":"medium"}'
-
-# list tasks (id from the response above)
-curl http://localhost:8000/tasks
-
-# fetch, update, delete a single task
-curl http://localhost:8000/tasks/1
-curl -X PATCH http://localhost:8000/tasks/1 -H "Content-Type: application/json" \
-  -d '{"title":"Write report","done":true,"priority":"high"}'
-curl -X DELETE http://localhost:8000/tasks/1 -w "%{http_code}\n"
-
-# both should now 404
-curl -w "%{http_code}\n" http://localhost:8000/tasks/1
-curl -w "%{http_code}\n" http://localhost:8000/tasks/999
+ECR_MLFLOW=$(terraform -chdir=terraform output -raw ecr_mlflow_url)
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin "${ECR_MLFLOW%%/*}"
+docker build --platform linux/amd64 -t "$ECR_MLFLOW:2.22.5-r2" mlflow-server
+docker push "$ECR_MLFLOW:2.22.5-r2"
 ```
 
-If you want to confirm the data is really persisted in Postgres and cached in Redis rather than
-held in memory:
+3. Namespace, storage, secrets, Postgres and MLflow. Secrets are generated at deploy time and
+never stored in Git:
 
 ```bash
-docker compose exec db psql -U tasks -d tasks -c "select * from tasks;"
-docker compose exec redis redis-cli keys '*'
+kubectl apply -f k8s/namespace.yaml -f k8s/storageclass.yaml
+PGPASS=$(openssl rand -hex 16)
+kubectl create secret generic postgres -n mlflow --from-literal=password="$PGPASS"
+kubectl create secret generic mlflow-backend -n mlflow \
+  --from-literal=uri="postgresql+psycopg2://mlflow:${PGPASS}@postgres.mlflow.svc.cluster.local:5432/mlflow"
+unset PGPASS
+kubectl apply -f k8s/postgres.yaml
+kubectl rollout status statefulset/postgres -n mlflow
+kubectl apply -f k8s/mlflow.yaml -f k8s/mlflow-nodeport.yaml
+kubectl rollout status deployment/mlflow -n mlflow
 ```
 
-## Task-priority model
+4. Monitoring and dashboard:
 
-`model/train.py` trains a trivial TF-IDF + logistic regression classifier that predicts a
-task's `priority` (low/medium/high) from its title + description, and logs it to MLflow. It's
-the starter kit for the MLFlowOps project option. Unlike the app itself, this part of the repo
-uses its own venv (see below) to keep the ML dependencies (`mlflow`, `pandas`, `scikit-learn`)
-out of the API's runtime image, and it is **not** part of `compose.yaml` — it's meant to be run
-from your host against the app's Postgres database.
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install monitoring prometheus-community/kube-prometheus-stack --version 93.1.1 \
+  -n monitoring --create-namespace -f k8s/monitoring-values.yaml
+kubectl create configmap dnt-prediction-dashboard -n monitoring \
+  --from-file=prediction.json=k8s/dashboards/prediction.json
+kubectl label configmap dnt-prediction-dashboard -n monitoring grafana_dashboard=1
+```
 
-Training reads directly from the app's Postgres `tasks` table — any task with a `priority` set
-(via the API/Swagger or the seed script below) becomes a training row. There's no separate
-dataset file to keep in sync with the app.
+5. Connect GitHub to AWS: set `ROLE_ARN` in `.github/workflows/mlops.yml` to the Terraform output
+`github_actions_role_arn`, and set `github_repo` and `github_repo_sub` in the Terraform variables
+to match your repository (the OIDC subject contains the owner and repository numeric IDs).
 
-### Step by step: seed data and train, alongside `docker compose up`
+6. Run the pipeline for the first time (see the next section). It creates the `staging` and
+`production` namespaces, trains the first model and puts it in production.
 
-1. **Start the app stack** (need at least Postgres reachable; the full stack is fine too):
-   ```bash
-   docker compose up -d
-   ```
-   Postgres is published on `localhost:5432`, so scripts run on your host can reach it with the
-   same default `DATABASE_URL` the app uses.
+## Retrain a model
 
-2. **Set up the model venv** (separate from the app's venv):
+On GitHub: **Actions**, **MLOps pipeline**, **Run workflow**. Or with the GitHub CLI:
+`gh workflow run mlops.yml`.
 
-   **Use Python 3.10–3.12.** `mlflow` pulls in `pyarrow`, which has no prebuilt wheel for very
-   new Python versions (3.13+) on several platforms — pip will try to build it from source and
-   fail with a `cmake` error unless you have the full C++ build toolchain installed. If
-   `python3 -V` shows 3.13 or newer, install 3.12 separately (e.g. `brew install python@3.12`)
-   and use that to create the venv below.
-   ```bash
-   python3.12 -m venv .venv-model
-   source .venv-model/bin/activate   # Windows: .venv-model\Scripts\activate
-   pip install -r model/requirements.txt
-   ```
+The pipeline then runs, with no manual command:
 
-3. **Seed labeled data** into the running Postgres container (or create your own tasks with a
-   `priority` through the API/Swagger UI instead):
-   ```bash
-   DATABASE_URL=postgresql+psycopg2://tasks:tasks@localhost:5432/tasks python model/generate_data.py
-   ```
+1. **Train**: a spot instance is launched (other zones and instance types are tried if there is no capacity, and training is retried once if the spot is reclaimed), the model is trained and registered in MLflow, and the instance is always terminated.
+2. **Promote to staging**: the newest version gets the `staging` alias only if it passes the validation rule (F1 macro at least 0.70, and not more than 0.02 below the production version).
+3. **Build**: the API image is built and pushed to ECR, tagged with the commit.
+4. **Deploy staging** and check that staging serves the promoted version.
+5. **Manual approval** of the `production` environment.
+6. **Promote and deploy production**: the `production` alias moves to the staging version, and the API is updated with a rolling update (no downtime), then checked.
 
-4. **Start a local MLflow tracking server** — this isn't part of `docker compose`, so run it
-   yourself, in another terminal, still inside `.venv-model`:
-   ```bash
-   mlflow server --host 127.0.0.1 --port 5050 --backend-store-uri ./mlruns
-   ```
-   > On macOS, avoid the commonly-used port 5000 — it's usually already bound by the built-in
-   > AirPlay Receiver, and MLflow will fail to start there with a confusing "Address already in
-   > use" error. Port 5050 (as above) or any other free port works fine.
+## Promote a model by hand, and roll back
 
-5. **Run training**, pointing at both the database and the tracking server:
-   ```bash
-   DATABASE_URL=postgresql+psycopg2://tasks:tasks@localhost:5432/tasks \
-   MLFLOW_TRACKING_URI=http://127.0.0.1:5050 \
-   python model/train.py
-   ```
-   You should see something like `accuracy=1.000 f1_macro=1.000` printed at the end (the
-   synthetic seed data is intentionally easy to classify perfectly — real usage data will be
-   noisier).
+Model versions are switched with MLflow aliases: no Kubernetes manifest changes.
 
-6. **Verify the run landed in MLflow**: open http://127.0.0.1:5050 in a browser, find the
-   `task-priority-classifier` experiment, and confirm the run shows the logged params
-   (`train_rows`, `test_rows`, `model_type`), metrics (`accuracy`, `f1_macro`), and a registered
-   model version.
+```bash
+kubectl port-forward -n mlflow svc/mlflow 5001:5000 &
+export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
+pip install mlflow-skinny==2.22.5
 
-If you run `train.py` before any labeled tasks exist, it fails fast with a clear error telling
-you to run `generate_data.py` or create tasks with a `priority` first, rather than crashing
-deep inside pandas/scikit-learn.
+python scripts/promote.py --to staging               # newest version, with the validation rule
+python scripts/promote.py --to staging --version 5   # a chosen version
+python scripts/promote.py --to production            # the staging version goes to production
+kubectl rollout restart deployment/model-serving-api -n production
+```
+
+Roll back production to an earlier version (here version 3):
+
+```bash
+python - <<'PY'
+from mlflow import MlflowClient
+MlflowClient().set_registered_model_alias("task-priority-classifier", "production", "3")
+PY
+kubectl rollout restart deployment/model-serving-api -n production
+```
+
+## Observability
+
+- **Metrics** (`/metrics`): `predict_requests_total` (by status and model version), `predict_latency_seconds` (histogram), `model_info` (served model version).
+- **Dashboard**: request rate, error rate, latency p95 and model version, with an environment selector (`staging` or `production`).
+- **Alert**: `PredictionErrorRateHigh` fires when more than 5 % of predictions fail for 2 minutes, in production.
+- **Logs**: one JSON line per request with `model_version`, method, path, status and duration. Health probes are not logged.
+
+Test the alert by making 30 % of predictions fail, then remove the variable:
+
+```bash
+kubectl set env deployment/model-serving-api -n production SIMULATE_ERROR_RATE=0.3
+# ... send traffic for about 8 minutes, watch the alert ...
+kubectl set env deployment/model-serving-api -n production SIMULATE_ERROR_RATE-
+```
+
+Grafana admin password: `kubectl get secret monitoring-grafana -n monitoring -o jsonpath='{.data.admin-password}' | base64 -d`
+
+## Cost control
+
+The training machine exists only during training (about 4 minutes) and is a spot instance.
+There is no load balancer and a single NAT gateway. When you stop working, destroy everything
+and rebuild it later with the steps above:
+
+```bash
+cd terraform && terraform destroy
+```
+
+## Known issues and how they were solved
+
+See [docs/DECISIONS.md](docs/DECISIONS.md), section "Problems met and how they were solved".
+
+---
+
+Dally NTOLO, DevOps & Cloud
