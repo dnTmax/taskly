@@ -1,0 +1,148 @@
+name: MLOps pipeline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # authentification AWS sans cle (OIDC)
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER: dnt-mlflowops
+  ROLE_ARN: arn:aws:iam::686699774218:role/dnt-mlflowops-github-actions
+  ECR: 686699774218.dkr.ecr.us-east-1.amazonaws.com/dnt-mlflowops-api
+
+defaults:
+  run:
+    shell: bash   # active pipefail : un echec dans un pipe fait echouer l'etape
+
+concurrency:
+  group: mlops-pipeline
+  cancel-in-progress: false
+
+jobs:
+  train:
+    name: Entrainement sur instance spot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER"
+      - run: pip install boto3
+      - name: Lancer l'entrainement
+        run: |
+          NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+          SUBNET=$(aws ec2 describe-subnets --filters "Name=tag:Name,Values=${CLUSTER}-vpc-private-*" --query "Subnets[0].SubnetId" --output text)
+          BUCKET=$(aws s3api list-buckets --query "Buckets[?starts_with(Name, '${CLUSTER}-artifacts-')].Name | [0]" --output text)
+          python scripts/run_training.py --bucket "$BUCKET" --subnet "$SUBNET" \
+            --template "${CLUSTER}-training" --mlflow-uri "http://${NODE_IP}:30500"
+
+  promote-staging:
+    name: Promotion en staging (regle de validation)
+    needs: train
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.promote.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER"
+      - run: pip install mlflow-skinny==2.22.5
+      - id: promote
+        run: |
+          kubectl port-forward -n mlflow svc/mlflow 5001:5000 >/dev/null 2>&1 &
+          sleep 5
+          export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
+          python scripts/promote.py --to staging | tee report.json
+          echo "version=$(jq -r .candidate_version report.json)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Construction de l'image de l'API
+    needs: train
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - run: |
+          docker build -t "$ECR:${{ steps.meta.outputs.tag }}" serving
+          docker push "$ECR:${{ steps.meta.outputs.tag }}"
+
+  deploy-staging:
+    name: Deploiement en staging
+    needs: [promote-staging, build]
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER"
+      - name: Deployer
+        run: |
+          cd k8s/serving/overlays/staging
+          kustomize edit set image "$ECR=$ECR:${{ needs.build.outputs.tag }}"
+          kubectl apply -k .
+          kubectl -n staging rollout restart deployment/model-serving-api
+          kubectl -n staging rollout status deployment/model-serving-api --timeout=300s
+      - name: Test de fumee (bonne version de modele servie)
+        run: |
+          kubectl -n staging port-forward svc/model-serving-api 8101:80 >/dev/null 2>&1 &
+          sleep 5
+          curl -sf localhost:8101/ready
+          VERSION=$(curl -s localhost:8101/metrics | grep '^model_info' | sed 's/.*model_version="\([0-9]*\)".*/\1/')
+          echo "version servie en staging : $VERSION (attendue : ${{ needs.promote-staging.outputs.version }})"
+          [ "$VERSION" = "${{ needs.promote-staging.outputs.version }}" ]
+
+  deploy-production:
+    name: Promotion et deploiement en production (approbation manuelle)
+    needs: [deploy-staging, build]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER"
+      - run: pip install mlflow-skinny==2.22.5
+      - name: Promouvoir en production
+        id: promote
+        run: |
+          kubectl port-forward -n mlflow svc/mlflow 5001:5000 >/dev/null 2>&1 &
+          sleep 5
+          export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
+          python scripts/promote.py --to production | tee report.json
+          echo "version=$(jq -r .production_version report.json)" >> "$GITHUB_OUTPUT"
+      - name: Deployer (mise a jour progressive, sans coupure)
+        run: |
+          cd k8s/serving/overlays/production
+          kustomize edit set image "$ECR=$ECR:${{ needs.build.outputs.tag }}"
+          kubectl apply -k .
+          kubectl -n production rollout restart deployment/model-serving-api
+          kubectl -n production rollout status deployment/model-serving-api --timeout=300s
+      - name: Test de fumee
+        run: |
+          kubectl -n production port-forward svc/model-serving-api 8102:80 >/dev/null 2>&1 &
+          sleep 5
+          curl -sf localhost:8102/ready
+          VERSION=$(curl -s localhost:8102/metrics | grep '^model_info' | sed 's/.*model_version="\([0-9]*\)".*/\1/')
+          echo "version servie en production : $VERSION (attendue : ${{ steps.promote.outputs.version }})"
+          [ "$VERSION" = "${{ steps.promote.outputs.version }}" ]
