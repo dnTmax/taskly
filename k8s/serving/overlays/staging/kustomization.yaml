@@ -1,0 +1,36 @@
+# Staging : charge le modele d'alias "staging", 1 seule replique, pas de PDB
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: staging
+resources:
+  - ../../base
+  - namespace.yaml
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: model-serving-api
+      spec:
+        replicas: 1
+        template:
+          spec:
+            containers:
+              - name: api
+                env:
+                  - name: MODEL_ALIAS
+                    value: staging
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: model-serving-api
+      spec:
+        minReplicas: 1
+        maxReplicas: 2
+  - patch: |-
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: model-serving-api

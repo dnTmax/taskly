@@ -1,0 +1,8 @@
+# Production : alias "production", 2 repliques, alerte active
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: production
+resources:
+  - ../../base
+  - namespace.yaml
+  - alert.yaml

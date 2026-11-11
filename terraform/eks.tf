@@ -52,3 +52,13 @@ module "eks" {
     }
   }
 }
+
+# Le plan de controle doit joindre le metrics-server gere par EKS (port 10251)
+resource "aws_vpc_security_group_ingress_rule" "metrics_server" {
+  security_group_id            = module.eks.node_security_group_id
+  referenced_security_group_id = module.eks.cluster_security_group_id
+  from_port                    = 10251
+  to_port                      = 10251
+  ip_protocol                  = "tcp"
+  description                  = "Plan de controle vers metrics-server (port 10251)"
+}

@@ -8,7 +8,7 @@ data "aws_ssm_parameter" "al2023" {
 # Aucun acces entrant, sorties libres (installer des paquets, joindre MLflow)
 resource "aws_security_group" "training" {
   name        = "${var.project}-training"
-  description = "Instance d'entrainement : aucun acces entrant"
+  description = "Training instance, no inbound access"
   vpc_id      = module.vpc.vpc_id
 
   egress {
@@ -185,4 +185,14 @@ resource "aws_iam_role_policy" "mlflow_s3" {
   name   = "model-bucket"
   role   = aws_iam_role.mlflow.id
   policy = data.aws_iam_policy_document.training_s3.json
+}
+
+# MLflow est expose en NodePort : seule l'instance d'entrainement peut le joindre
+resource "aws_vpc_security_group_ingress_rule" "mlflow_from_training" {
+  security_group_id            = module.eks.node_security_group_id
+  referenced_security_group_id = aws_security_group.training.id
+  from_port                    = 30500
+  to_port                      = 30500
+  ip_protocol                  = "tcp"
+  description                  = "MLflow NodePort depuis instance entrainement"
 }

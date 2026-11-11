@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-serving-api
+  labels:
+    app: model-serving-api
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0   # jamais moins de pods qu'avant : pas de coupure
+      maxSurge: 1         # un pod de plus pendant la mise a jour
+  selector:
+    matchLabels:
+      app: model-serving-api
+  template:
+    metadata:
+      labels:
+        app: model-serving-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: api
+          image: 686699774218.dkr.ecr.us-east-1.amazonaws.com/dnt-mlflowops-api:0.1.1
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: http://mlflow.mlflow.svc.cluster.local:5000
+            - name: MODEL_NAME
+              value: task-priority-classifier
+            - name: MODEL_ALIAS
+              value: production
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi

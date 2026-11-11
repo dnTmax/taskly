@@ -1,0 +1,15 @@
+# Acces MLflow pour l'instance d'entrainement (hors cluster).
+# Le port 30500 n'est ouvert qu'au groupe de securite d'entrainement (voir terraform/training.tf).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-training
+  namespace: mlflow
+spec:
+  type: NodePort
+  selector:
+    app: mlflow
+  ports:
+    - port: 5000
+      targetPort: 5000
+      nodePort: 30500

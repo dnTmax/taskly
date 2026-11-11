@@ -1,0 +1,7 @@
+mlflow==2.22.5
+scikit-learn==1.9.1
+pandas==2.3.3
+numpy==2.5.4
+cloudpickle==3.1.2
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.9

@@ -1,0 +1,15 @@
+# Dit a Prometheus de lire /metrics sur l'API
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: model-serving-api
+  labels:
+    app: model-serving-api
+spec:
+  selector:
+    matchLabels:
+      app: model-serving-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

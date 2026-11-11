@@ -1,0 +1,21 @@
+# Alerte : plus de 5 % d'erreurs de prediction pendant 2 minutes, en production uniquement
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: model-serving-api
+  labels:
+    app: model-serving-api
+spec:
+  groups:
+    - name: model-serving-api
+      rules:
+        - alert: PredictionErrorRateHigh
+          expr: |
+            sum(rate(predict_requests_total{status="error",namespace="production"}[5m]))
+              / sum(rate(predict_requests_total{namespace="production"}[5m])) > 0.05
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Taux d'erreur des predictions superieur a 5 % (production)"
+            description: "Plus de 5 % des predictions echouent depuis 2 minutes."
