@@ -15,10 +15,10 @@ import urllib.request
 from common import emit, run_agent
 
 SYSTEM = (
-    "Tu aides une personne a decider d'approuver ou non le passage d'un modele en production. "
-    "Tu recois des mesures prises sur l'environnement de staging : version attendue et servie, "
-    "nombre de requetes, erreurs, latence p95 en millisecondes. Reponds par un JSON "
-    '{"verdict": "ok" | "attention" | "bloquer", "reasons": ["..."]}.'
+    "You help a person decide whether to approve a model for production. "
+    "You receive measurements taken on the staging environment: expected and served version, "
+    "number of requests, errors, p95 latency in milliseconds. Answer with JSON "
+    '{"verdict": "ok" | "warning" | "block", "reasons": ["..."]}.'
 )
 
 TITLES = [
@@ -40,7 +40,7 @@ def collect(url, expected, n):
             errors += 1
         latencies.append((time.perf_counter() - start) * 1000)
     latencies.sort()
-    served = "inconnue"
+    served = "unknown"
     try:
         with urllib.request.urlopen(url + "/metrics", timeout=5) as r:
             m = re.search(r'model_info\{[^}]*model_version="([^"]+)"', r.read().decode())
@@ -57,19 +57,19 @@ def collect(url, expected, n):
 
 def simulate(s):
     if s["served_version"] != s["expected_version"]:
-        return {"verdict": "bloquer", "reasons": [
-            f"Staging sert la version {s['served_version']} au lieu de {s['expected_version']}."]}
+        return {"verdict": "block", "reasons": [
+            f"Staging serves version {s['served_version']} instead of {s['expected_version']}."]}
     if s["error_rate"] > 0.05:
-        return {"verdict": "bloquer", "reasons": [f"Taux d'erreur de {s['error_rate']:.1%} sur staging."]}
+        return {"verdict": "block", "reasons": [f"Error rate of {s['error_rate']:.1%} on staging."]}
     reasons = []
     if s["errors"] > 0:
-        reasons.append(f"{s['errors']} erreur(s) sur {s['requests']} requetes.")
+        reasons.append(f"{s['errors']} error(s) out of {s['requests']} requests.")
     if s["p95_ms"] > 500:
-        reasons.append(f"Latence p95 elevee : {s['p95_ms']} ms.")
+        reasons.append(f"High p95 latency: {s['p95_ms']} ms.")
     if reasons:
-        return {"verdict": "attention", "reasons": reasons}
+        return {"verdict": "warning", "reasons": reasons}
     return {"verdict": "ok", "reasons": [
-        f"Version {s['served_version']} servie, 0 erreur sur {s['requests']} requetes, p95 {s['p95_ms']} ms."]}
+        f"Version {s['served_version']} served, 0 errors out of {s['requests']} requests, p95 {s['p95_ms']} ms."]}
 
 
 def main():
@@ -86,3 +86,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

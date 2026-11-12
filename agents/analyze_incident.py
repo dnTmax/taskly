@@ -12,11 +12,11 @@ import sys
 from common import emit, run_agent
 
 SYSTEM = (
-    "Tu analyses un incident sur une API de prediction. Tu recois un resume calcule a partir des "
-    "journaux JSON : requetes et erreurs par version du modele, messages d'erreur. Propose la cause "
-    "probable et des actions pour la personne d'astreinte (retour a une version precedente, "
-    "retrait d'une injection de pannes, verification des journaux). Reponds par un JSON "
-    '{"verdict": "ok" | "attention" | "critique", "reasons": ["..."], "suggested_actions": ["..."]}.'
+    "You analyze an incident on a prediction API. You receive a summary computed from the JSON "
+    "logs: requests and errors per model version, error messages. Propose the probable cause "
+    "and actions for the on-call person (roll back to a previous version, remove fault "
+    "injection, check the logs). Answer with JSON "
+    '{"verdict": "ok" | "warning" | "critical", "reasons": ["..."], "suggested_actions": ["..."]}.'
 )
 
 
@@ -33,7 +33,7 @@ def summarize(path):
                 d = json.loads(line)
             except ValueError:
                 continue
-            v = str(d.get("model_version", "inconnue"))
+            v = str(d.get("model_version", "unknown"))
             if d.get("message") == "requete http":
                 total += 1
                 entry = versions.setdefault(v, {"requests": 0, "errors": 0})
@@ -56,29 +56,29 @@ def summarize(path):
 
 def simulate(s):
     if s["errors"] == 0:
-        return {"verdict": "ok", "reasons": ["Aucune erreur dans les journaux fournis."], "suggested_actions": []}
+        return {"verdict": "ok", "reasons": ["No errors in the provided logs."], "suggested_actions": []}
     rate = s["error_rate"]
     if s["simulated_faults"]:
         return {
-            "verdict": "attention",
-            "reasons": [f"{rate:.0%} d'erreurs, causees par l'injection de pannes (SIMULATE_ERROR_RATE)."],
+            "verdict": "warning",
+            "reasons": [f"{rate:.0%} errors, caused by fault injection (SIMULATE_ERROR_RATE)."],
             "suggested_actions": ["kubectl set env deployment/model-serving-api -n production SIMULATE_ERROR_RATE-"],
         }
     bad = [v for v, d in s["versions"].items() if d["errors"] > 0]
     good = [int(v) for v, d in s["versions"].items() if d["errors"] == 0 and d["requests"] > 0 and v.isdigit()]
     if len(bad) == 1 and good:
         return {
-            "verdict": "critique" if rate > 0.05 else "attention",
-            "reasons": [f"Toutes les erreurs ({rate:.0%}) viennent de la version {bad[0]} ; "
-                        f"la version {max(good)} n'en a aucune."],
+            "verdict": "critical" if rate > 0.05 else "warning",
+            "reasons": [f"All errors ({rate:.0%}) come from version {bad[0]}; "
+                        f"version {max(good)} has none."],
             "suggested_actions": [
-                f"Remettre l'alias production sur la version {max(good)} (voir README, section revenir en arriere)",
+                f"Point the production alias back to version {max(good)} (see README, rollback section)",
                 "kubectl rollout restart deployment/model-serving-api -n production",
             ],
         }
     return {
-        "verdict": "critique" if rate > 0.05 else "attention",
-        "reasons": [f"{rate:.0%} d'erreurs sans cause evidente ; messages : {s['error_messages']}."],
+        "verdict": "critical" if rate > 0.05 else "warning",
+        "reasons": [f"{rate:.0%} errors with no obvious cause; messages: {s['error_messages']}."],
         "suggested_actions": ["kubectl logs -n production -l app=model-serving-api --tail=100"],
     }
 
@@ -87,8 +87,8 @@ def main():
     try:
         summary = summarize(sys.argv[1])
     except Exception as e:  # noqa: BLE001
-        emit({"agent": "incident", "mode": "aucun", "verdict": "indisponible",
-              "reasons": [f"journaux illisibles : {type(e).__name__}"]})
+        emit({"agent": "incident", "mode": "none", "verdict": "unavailable",
+              "reasons": [f"unreadable logs : {type(e).__name__}"]})
         return
     result = run_agent("incident", SYSTEM, summary, simulate, ["verdict", "reasons"])
     result["summary"] = summary
