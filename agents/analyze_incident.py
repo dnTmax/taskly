@@ -43,7 +43,7 @@ def summarize(path):
                     entry["errors"] += 1
             if d.get("level") == "ERROR":
                 text = (str(d.get("message", "")) + "\n" + str(d.get("exception", ""))).strip()
-                if "erreur simulee" in text:
+                if "simul" in line.lower():
                     simulated = True
                 messages.add(text.splitlines()[-1][:120])
     return {
@@ -79,7 +79,8 @@ def simulate(s):
     return {
         "verdict": "critical" if rate > 0.05 else "warning",
         "reasons": [f"{rate:.0%} errors with no obvious cause; messages: {s['error_messages']}."],
-        "suggested_actions": ["kubectl logs -n production -l app=model-serving-api --tail=100"],
+        "suggested_actions": ["kubectl logs -n production -l app=model-serving-api --tail=100",
+                              "Check for fault injection: kubectl get deployment model-serving-api -n production -o jsonpath='{.spec.template.spec.containers[0].env}'"],
     }
 
 
@@ -97,3 +98,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
