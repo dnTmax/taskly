@@ -1,0 +1,39 @@
+name: incident
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: "Environnement a analyser (production ou staging)"
+        default: production
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER: dnt-mlflowops
+  ROLE_ARN: arn:aws:iam::686699774218:role/dnt-mlflowops-github-actions
+
+jobs:
+  analyse:
+    name: Analyse d'incident (agent consultatif)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER"
+      - name: Recuperer les journaux de l'API
+        run: |
+          kubectl logs -n "${{ inputs.namespace }}" -l app=model-serving-api --tail=-1 \
+            | grep '^{' > journaux.jsonl || true
+          echo "lignes recuperees : $(wc -l < journaux.jsonl)"
+      - name: Agent d'analyse d'incident (avis consultatif)
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 agents/analyze_incident.py journaux.jsonl
